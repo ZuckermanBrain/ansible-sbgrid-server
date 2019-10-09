@@ -1,0 +1,1030 @@
+#!/usr/bin/env bash
+#
+# 832c29c2    2016-09-20 13:54:01 -0400    key
+
+USAGE="$(basename $0): a tool for administering an SBGrid Software suite installation
+
+Usage: $(basename $0) [-hitu] [-ms] [-cpr]
+
+General Options:
+  -h This message.
+  -i Install the software suite on this machine.
+  -t Test the configuration file.
+  -u Force manual update of an existing installation.
+
+Manual Software Branch Options:
+  -m Install the software branch for Mac OS X PowerPC.
+  -s Install the software branch for SGI IRIX.
+
+Less Common Options:
+  -c Cron mode. Used for automated updates of the software suite.
+  -p Print a launchd plist for updating the software on OS X machines.
+  -r Regenerate sh/csh shell configuration files.
+
+"
+
+# PATH set up
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:$PATH
+export LOCK="$HOME/.sbgrid-admin.lock"
+export CONFIG="$HOME/.sbgridrc"
+export PS4='+(${BASH_SOURCE##*/}:${LINENO}): ${FUNCNAME[0]:+${FUNCNAME[0]}(): } '
+
+### Debug mode
+if [ "$SB_DEBUG" = "true" ]; then
+  set -x
+fi
+
+### Check args on first run
+if [ "$UPDATERUN" != "true" ]; then
+  if [ ! $1 ]; then
+    echo "$USAGE"
+    exit 1
+  fi
+  # Unset our variables on first run
+  unset CRONMODE INSTALL TEST UPDATE VERBOSE
+fi
+
+# Getopts loop
+while getopts "chimprstu" Option
+do
+  case $Option in
+    c) export CRONMODE=true;;
+    h) echo "$USAGE"
+       exit 0;;
+    i) export INSTALL=true;;
+    m) POWERMAC=true;;
+    p) PLIST=true;;
+    r) REGEN=true;;
+    s) SGI=true;;
+    t) TEST=true;;
+    u) export UPDATE=true;;
+    *) echo "$USAGE"
+       exit 1;;
+  esac
+done
+shift $(($OPTIND - 1))
+
+# Unset incompatible options
+if [ "$TEST" = "true" ]; then
+  VERBOSE=true
+  unset INSTALL UPDATE CRONMODE
+fi
+if [ "$INSTALL" = "true" ]; then
+  VERBOSE=true
+  unset UPDATE CRONMODE
+fi
+if [ "$UPDATE" = "true" ]; then
+  VERBOSE=true
+  if [ "$CRONMODE" = "true" ]; then
+    log_normal "Ignoring incompatible option for cron mode.\n"
+    unset CRONMODE
+  fi
+fi
+if [ "$CRONMODE" = "true" ]; then
+  unset VERBOSE
+fi
+if [ "$SGI" = "true" ]; then
+  VERBOSE=true
+  unset INSTALL UPDATE CRONMODE POWERMAC
+fi
+if [ "$POWERMAC" = "true" ]; then
+  VERBOSE=true
+  unset INSTALL UPDATE CRONMODE SGI
+fi
+if [ "$REGEN" = "true" ]; then
+  VERBOSE=true
+  unset INSTALL UPDATE CRONMODE SGI
+fi
+
+### Trap signals so we can clean up interrupted operations
+trap script_exit INT TERM
+
+script_exit() {
+  user_exit=true
+  clean_up 47
+}
+
+clean_up() {
+  if [ "$user_exit" = "true" ]; then
+    log_normal "\n==> Script exit called. Cleaning up...\n"
+    killall -KILL rsync > /dev/null 2>&1
+  fi
+  sleep 2
+  if [ -f "$LOCK" ]; then
+    RUNPID=$(cat "$LOCK")
+    if [ "$$" -eq "$RUNPID" ]; then
+      log_normal "Removing update lock file.\n"
+      rm "$LOCK"
+    fi
+  else
+    if [ -f "$target/.rsync-filter" ]; then
+      rm "$target/.rsync-filter"
+    fi
+  fi
+  log_normal "Script finished: $(date)\n"
+  # Calling clean_up 1 is the just-exit-not-report mode.
+  if [ "$1" = "1" ]; then
+    exit 1
+  elif [ -n "$1" ]; then
+    post_status "$1"
+    exit "$1"
+  else
+    post_status 0
+    exit 0
+  fi
+}
+
+post_status() {
+  exitcode="$1"
+  if [ -z "$LOCAL_VERSION" ] || [ "$LOCAL_VERSION" = "0" ]; then
+    if [ -r "$target/share/sbgrid/version.major" ]; then
+      LOCAL_VERSION=$(cat "$target/share/sbgrid/version.major")
+    fi
+  fi
+  if [ -z "$sitename" ]; then
+    if [ -r "$target/share/sitename" ]; then
+      sitename=$(cat "$target/share/sitename")
+    fi
+  fi
+  curl_cmd -q -d action=sync_result -d site="$sitename" -d sb_exitcode="$exitcode" -d sb_version="$LOCAL_VERSION" "${UPDATE_URL}" > /dev/null 2>&1
+}
+
+# Script version
+print_script_version() {
+  version_string='832c29c2    2016-09-20 13:54:01 -0400    key'
+  script_ver=$(echo $version_string | awk '{print $3}')
+  log_normal "Script version: $script_ver\n"
+}
+
+### Logging functions
+log_normal() {
+  if [ "$CRONMODE" != "true" ]; then
+    if [ "$UPDATERUN" != "true" ]; then
+      printf "* $1"
+    fi
+  fi
+  if [ "$2" ]; then
+    clean_up "$2"
+  fi
+}
+
+log_error() {
+  if [ -t 0 ]; then
+    printf "!   \e[0;31m$1\e[0m" 1>&2
+  else
+    printf "!   $1" 1>&2
+  fi
+  if [ "$2" ]; then
+    clean_up "$2"
+  fi
+}
+
+log_simple() {
+  if [ "$CRONMODE" != "true" ]; then
+    if [ "$UPDATERUN" != "true" ]; then
+      printf "$1"
+    fi
+  fi
+}
+
+### sbgridrc interactive generation
+print_rc() {
+  printf "$1\n" >> "$CONFIG"
+}
+
+create_sbgridrc() {
+  if [ -f "$CONFIG" ]; then
+    log_error "You have a pre-existing sbgridrc at:\n"
+    log_error "  $CONFIG\n"
+    log_normal "\n* It contains the following settings:\n"
+    read_sbgridrc
+    log_normal "Would you like to change these settings?  y/N\n"
+    read change_existing
+    case "$change_existing" in
+      y|Y) rm "$CONFIG"
+           create_sbgridrc
+      ;;
+    esac
+  else
+    log_normal "Creating new configuration file at:\n"
+    log_normal "  $CONFIG\n*\n"
+
+    log_normal "This script will walk you through creating an SBGrid\n"
+    log_normal "configuration file for your site. You will be asked to\n"
+    log_normal "confirm your settings before the download begins. You\n"
+    log_normal "will need the account creation email that was sent to \n"
+    log_normal "you to complete this section.\n*\n"
+
+    log_normal "You will have the opportunity to review your answers and correct\n"
+    log_normal "any errors before the installation begins. Follow all entries \n"
+    log_normal "with a carriage return. Capital letters signify default answers.\n"
+    log_normal "Exit at any time with a CTRL-c.\n*\n"
+
+    # Unset our answer variables
+    unset install_sitename install_sitekey change_install install_target
+    unset absolute use_proxy install_proxy install_rsync_args confirmation start
+
+    log_normal "Enter the SBGrid site name:\n"
+    read install_sitename
+    log_normal "Enter the SBGrid site key:\n"
+    read install_sitekey
+    log_normal "The default installation directory for the software is:\n"
+    log_normal "  $HOME/programs\n"
+    log_normal "Do you want to change the location?  y/N\n"
+    read change_install
+    case "$change_install" in
+      y|Y)
+        log_normal "Enter the absolute path to the new installation directory:\n"
+        while [ "$absolute" != "true" ]; do
+          read install_target
+          echo $install_target | grep -q '^/' > /dev/null 2>&1
+          if [ $? -eq 0 ]; then
+            absolute=true
+          else
+            log_error "Please enter an absolute path.\n"
+          fi
+        done
+      ;;
+    esac
+
+    print_rc "### sbgridrc for $install_sitename"
+    print_rc "SB_SITENAME=$install_sitename"
+    print_rc "SB_SITEKEY=\"$install_sitekey\""
+
+    if [ -n "$install_target" ]; then
+      print_rc "INSTALL_TARGET=\"$install_target\""
+    else
+      print_rc "#INSTALL_TARGET=\"\$HOME/programs\""
+    fi
+
+    print_rc "#RSYNC_ARGS="
+    print_rc "#HTTP_PROXY=host.name:port"
+    print_rc "#SYNC_SERVER=host.name"
+    print_rc "#POST_UPDATE_SCRIPT=/absolute/path/to/script"
+
+    read_sbgridrc
+    log_normal "Do these settings look correct?  Y/n\n"
+    read confirmation
+    if [ "$confirmation" = "n" ]; then
+      rm "$CONFIG"
+      create_sbgridrc
+    fi
+    chmod 600 "$CONFIG"
+  fi
+  log_normal "We are ready to start the download process. This could take hours \n"
+  log_normal "or days depending on connection speed and download size. You might \n"
+  log_normal "want to run it in a 'screen' session. Shall we proceed? Y/n\n"
+  read start
+  if [ "$start" = "n" ]; then
+    log_normal "The configuration file has already been created. When you are ready \n"
+    log_normal "to complete the installation, run 'sbgrid-admin -u' to download the \n"
+    log_normal "software.\n" 0
+  fi
+  log_normal "Starting the download.\n*\n"
+}
+
+### Read/test the SBGrid configuration file
+read_sbgridrc() {
+  unset SB_SITENAME SB_USERNAME SB_SITEKEY SYNC_SERVER INSTALL_TARGET RSYNC_ARGS HTTP_PROXY POST_UPDATE_SCRIPT OUTPUT_CHECK HTTP_PROXY_USERNAME HTTP_PROXY_PASSWORD
+  if [ -f "$CONFIG" ]; then
+    chmod 600 "$CONFIG"
+    if [ $? -ne 0 ]; then
+      log_error "Unable to change permissions to 600 on $CONFIG!\n" 1
+    fi
+    OUTPUT_CHECK=$(sh "$CONFIG" 2>&1)
+    if [ -n "$OUTPUT_CHECK" ]; then
+      log_error "\n==> Error detected in $CONFIG. The error is:\n"
+      log_error "\n"
+      log_error "$OUTPUT_CHECK\n"
+      log_error "\n"
+      log_error "Please correct your configuration before continuing.\n==>\n" 1
+    else
+      . "$CONFIG"
+    fi
+  fi
+
+  ## Three required settings
+  # Site name
+  if [ -n "$SB_SITENAME" ]; then
+    export sitename="$SB_SITENAME"
+    log_normal "  Site name: $SB_SITENAME\n"
+  else
+    log_error "SB_SITENAME is a required option in $CONFIG\n" 1
+  fi
+  # Rsync user name
+  if [ -z "$SB_USERNAME" ]; then
+    export USER=$SB_SITENAME
+  else
+    export USER=$SB_USERNAME
+    log_normal "  User name: $USER\n"
+  fi
+
+  # rsync password
+  if [ -n "$SB_SITEKEY" ]; then
+    export RSYNC_PASSWORD="$SB_SITEKEY"
+    log_normal "  Site key: Entered, not echoed\n"
+  else
+    log_error "SB_SITEKEY is a required option in $CONFIG\n" 1
+  fi
+
+  ## Optional settings
+  # Alternate installation target
+  if [ -n "$INSTALL_TARGET" ]; then
+    export target="$INSTALL_TARGET"
+  else
+    export target="$HOME/programs"
+  fi
+  log_normal "  Software installation target: $target\n"
+  # Alternate sync server
+  if [ -n "$SYNC_SERVER" ]; then
+    export sync_server="$SYNC_SERVER"
+    log_normal "  Sync server: $sync_server\n"
+  else
+    sync_server="sync.sbgrid.org"
+  fi
+  STATUS_URL="http://${sync_server}/client/status.php?"
+  UPDATE_URL="http://${sync_server}/client/update.php?"
+
+  # Get the name of the host
+  if [ -f "$target/share/hostname" ]; then
+    host=$(cat "$target/share/hostname")
+  else
+    host=$(hostname | awk '{print $1}')
+  fi
+
+  # Advanced rsync arguments
+  if [ -n "$RSYNC_ARGS" ]; then
+    export rsync_userargs="$RSYNC_ARGS"
+    log_normal "  Advanced rsync arguments: $rsync_userargs\n"
+  fi
+  # HTTP Proxy
+  if [ -n "$HTTP_PROXY" ]; then
+    if [ -n "$HTTP_PROXY_USERNAME" ]; then
+      if [ -n "$HTTP_PROXY_PASSWORD" ]; then
+        export http_proxy="${HTTP_PROXY_USERNAME}:${HTTP_PROXY_PASSWORD}@${HTTP_PROXY}"
+        log_normal "  HTTP proxy: ${HTTP_PROXY_USERNAME}:*********@${HTTP_PROXY}\n"
+      else
+        log_error "HTTP_PROXY_USERNAME is set, but no password is specified.\n"
+        log_normal "  HTTP proxy: $HTTP_PROXY\n"
+      fi
+    else
+      export http_proxy="$HTTP_PROXY"
+      log_normal "  HTTP proxy: $HTTP_PROXY\n"
+    fi
+  fi
+  # Cron schedule
+  if [ -n "$CRON_SCHEDULE" ]; then
+    export custom_schedule="$CRON_SCHEDULE"
+    log_normal "  Custom cron schedule: $custom_schedule\n"
+  fi
+  # Post update script
+  if [ -n "$POST_UPDATE_SCRIPT" ]; then
+    export post_update_script="$POST_UPDATE_SCRIPT"
+    log_normal "  Post update script: $post_update_script\n"
+  fi
+
+  # Figure out the system type
+  if [ "$(uname)" = "Linux" ]; then
+    if [ $(uname -m) = x86_64 ]; then
+      osname=linux64
+      system="$target/x86_64-linux/system"
+    else
+      osname=linux32
+      system="$target/i386-linux/system"
+    fi
+  elif [ "$(uname)" = "Darwin" ]; then # OS X found
+    if [ "$(uname -m)" = "i386" ] || [ "$(uname -m)" = "x86_64" ]; then # OS X Intel
+      osname=osx86
+      system="$target/i386-mac/system"
+    else # OS X PowerPC
+      osname=osxppc
+      export PATH="$target/powermac/rsync/3.0.6/bin:$PATH"
+    fi
+    osxminorver=$(sw_vers | grep ProductVersion | awk '{print $2}')
+    osxver=$(echo $osxminorver | awk -F. '{print $1"."$2}')
+  elif [ "$(uname)" = "FreeBSD" ]; then # FreeBSD
+    osname="FreeBSD"
+    system="$target/FreeBSD/system"
+  else
+    osname=unknown
+  fi
+
+  # Choose curl
+  if [ "$osxver" = "10.7" ]; then
+    curl_cmd() {
+      curl "$@"
+      curl_exit=$?
+      }
+  elif [ -x "$system/curl/current/bin/curl" ]; then
+    "$system/curl/current/bin/curl" --version >& /dev/null
+    if [ $? -eq 0 ]; then
+      curl_cmd() {
+        "$system/curl/current/bin/curl" "$@"
+        curl_exit=$?
+      }
+    else
+      curl_cmd() {
+        curl "$@"
+        curl_exit=$?
+      }
+    fi
+  else
+    curl_cmd() {
+      curl "$@"
+      curl_exit=$?
+    }
+  fi
+  log_normal "\n"
+}
+
+### Calling rsync
+# Bootstrap method
+bootstrap_rsync() {
+  log_normal "\n* Bootstrapping a modern rsync binary into place... "
+  mkdir -p "$system"
+  case "$system" in
+    */x86_64-linux/system)
+      rsync -aq "rsync://$sync_server/$sitename/main/programs/x86_64-linux/system/rsync" "$system/"
+    ;;
+    */i386-mac/system)
+      rsync -aq "rsync://$sync_server/$sitename/main/programs/i386-mac/system/rsync" "$system/"
+    ;;
+    */i386-linux/system)
+      rsync -aq "rsync://$sync_server/$sitename/main/programs/i386-linux/system/rsync" "$system/"
+    ;;
+    */FreeBSD/system)
+      log_simple "Found BSD.\n"
+      log_normal "We'll try to use the system rsync instead.\n"
+    ;;
+  esac
+  if [ $? -eq 0 ]; then
+    log_simple "success.\n"
+  else
+    log_simple "failed.\n"
+    log_normal "We'll try to use the system rsync instead.\n"
+  fi
+}
+
+# Test our rsync, fallback to system if it's broken
+rsync_cmd() {
+  if [ "$INSTALL" = "true" ] && [ "$UPDATERUN" != "true" ] && [ "$SITEOVERRIDE" != "true" ]; then
+    bootstrap_rsync
+  fi
+  if [ "$FORCE" = "1" ] && [ "$UPDATERUN" != "true" ] && [ "$SITEOVERRIDE" != "true" ]; then
+    bootstrap_rsync
+  fi
+  if [ -x "$system/rsync/current/bin/rsync" ]; then
+    "$system/rsync/current/bin/rsync" --version >& /dev/null
+    if [ $? -eq 0 ]; then
+      "$system/rsync/current/bin/rsync" $rsync_userargs "$@"
+      rsync_exit=$?
+      export SBRSYNC=true
+    else
+      rsync $rsync_userargs "$@"
+      rsync_exit=$?
+    fi
+  else
+    rsync $rsync_userargs "$@"
+    rsync_exit=$?
+  fi
+}
+
+rsync_update() {
+  # Create a lockfile
+  set_state
+
+  # Set the version to in-progress update
+  mkdir -p "$target/share/sbgrid"
+  echo "in-progress" > "$target/share/sbgrid/update-formatted.version"
+  chmod 644 "$target/share/sbgrid/update-formatted.version"
+
+  # Updates turned off on the server
+  SWUPDATE=$(curl_cmd -m 60 -s "${STATUS_URL}key=update&site=$sitename&hostname=$host" 2> /dev/null)
+  if [ "$SWUPDATE" = "0" ]; then
+    log_normal "The SBGrid software distribution server is offline for maintenance.\n"
+    clean_up 0
+  fi
+
+  if [ -d "$target" ] && [ -w "$target" ]; then
+    if [ "$UPDATERUN" = "true" ]; then
+      unset UPDATERUN
+
+      # Default rsync command settings
+      if [ "$VERBOSE" = "true" ]; then
+        if [ "$SBRSYNC" = "true" ]; then
+          rsync_args="-zrlptODP --delete-during"
+        else
+          rsync_args="-zrlptODP --delete"
+        fi
+      else
+        if [ "$SBRSYNC" = "true" ]; then
+          rsync_args="-zrlptODq --delete-during"
+        else
+          rsync_args="-zrlptODq --delete"
+        fi
+      fi
+
+      # Grab rsync excludes file
+      log_normal "Downloading rsync exclude file..."
+      rsync_cmd $rsync_args -ptq "rsync://$sync_server/sbgrid-global/main/programs/.rsync-filter" "$target"
+      if [ $rsync_exit -ne 0 ]; then
+        log_error "\n"
+        log_error "Couldn't download the rsync filter file. Rsync exit code: $rsync_exit\n"
+        if [ $rsync_exit -eq 5 ]; then
+          log_error "Exit code 5 is an authentication failure. Did you specify\n"
+          log_error "the correct site name and site key?\n" 42
+        elif [ $rsync_exit -eq 10 ]; then
+          log_error "Exit code 10 is a connection failure. Is outbound rsync (TCP:873)\n"
+          log_error "blocked at your site?\n" 43
+        else
+          log_error "This is an unusual rsync exit code. Please paste this shell\n"
+          log_error "output into an email to accounts@sbgrid.org to generate a ticket.\n" "6${rsync_exit}"
+        fi
+      fi
+      log_simple " success.\n"
+      if [ "$CRONMODE" = "true" ] && [ "$FORCE" != "true" ]; then
+        SLEEPSEC=$(($$%300))
+        sleep "$SLEEPSEC"
+      fi
+
+      # Run the rsync processes
+      log_normal "Starting software download using rsync command:\n"
+      if [ "$SBRSYNC" = "true" ]; then
+        log_normal "  $system/rsync/current/bin/rsync $rsync_args rsync://$sync_server/$sitename/*/*/ $target\n\n"
+      else
+        pathrsync=$(which rsync)
+        log_normal "  $pathrsync $rsync_args rsync://$sync_server/$sitename/*/*/ $target\n\n"
+      fi
+      # The sync server connections may be maxed out. Loop on max connections with a backoff.
+      rsync_exit=5
+      backoffcount=1
+      until [ $rsync_exit -ne 5 ]; do
+        rsync_cmd $rsync_args --filter=". $target/.rsync-filter" "rsync://$sync_server/$sitename/*/*/" "$target"  2> /dev/null
+        backoff="60 300 900 1800 3600"
+        sleepsec=$(echo $backoff | awk -v counter="$backoffcount" '{print $counter}')
+        if [ $rsync_exit -eq 5 ]; then
+          log_normal "No open connection slots on $sync_server. Sleeping 300 seconds\n"
+          log_normal "before retrying.\n"
+          sleep 300
+        elif [ $rsync_exit -eq 12 ]; then
+          if [ $backoffcount -eq 6 ]; then
+            log_error "The download has encountered a half dozen network errors. Please resolve\n"
+            log_error "these errors before trying to download the software again.\n" 39
+          fi
+          log_error "The download encountered a network error. Sleeping $sleepsec seconds\n"
+          log_error "before retrying. Attempt $backoffcount of 5.\n"
+          rsync_exit=5
+          sleep "$sleepsec"
+        fi
+        backoffcount=$((1 + $backoffcount))
+        if [ "$backoffcount" = "6" ]; then
+          backoffcount=1
+        fi
+      done
+
+      # Run the rsync process for site-specific files
+      if [ -e "$target/share/sbgrid/update_override" ]; then
+        export SITEOVERRIDE="true"
+        rsync_args="-zrlptODP"
+        log_normal "Continuing site-specific software download using rsync command:\n"
+        if [ "$SBRSYNC" = "true" ]; then
+          log_normal "  $system/rsync/current/bin/rsync $rsync_args rsync://$sync_server/$sitename/sites/$sitename/*** $target\n\n"
+        else
+          pathrsync=$(which rsync)
+          log_normal "  $pathrsync $rsync_args rsync://$sync_server/$sitename/sites/$sitename/*** $target\n\n"
+        fi
+        # The sync server connections may be maxed out. Loop on max connections with a backoff.
+        rsync_exit=5
+        backoffcount=1
+        until [ $rsync_exit -ne 5 ]; do
+          rsync_cmd $rsync_args "rsync://$sync_server/$sitename/sites/$sitename/***" "$target"  2> /dev/null
+          backoff="60 300 900 1800 3600"
+          sleepsec=$(echo $backoff | awk -v counter="$backoffcount" '{print $counter}')
+          if [ $rsync_exit -eq 5 ]; then
+            log_normal "No open connection slots on $sync_server. Sleeping 300 seconds\n"
+            log_normal "before retrying.\n"
+            sleep 300
+          elif [ $rsync_exit -eq 12 ]; then
+            if [ $backoffcount -eq 6 ]; then
+              log_error "The download has encountered a half dozen network errors. Please resolve\n"
+              log_error "these errors before trying to download the software again.\n" 39
+            fi
+            log_error "The download encountered a network error. Sleeping $sleepsec seconds\n"
+            log_error "before retrying. Attempt $backoffcount of 5.\n"
+            rsync_exit=5
+            sleep "$sleepsec"
+          fi
+          backoffcount=$((1 + $backoffcount))
+          if [ "$backoffcount" = "6" ]; then
+            backoffcount=1
+          fi
+        done
+      fi
+
+      # Rsync-site is done, get out of OVERRIDE mode
+      unset SITEOVERRIDE
+
+      # Rsync is done, get out of UPDATERUN mode
+      unset UPDATERUN
+
+      # The nuclear option
+      if [ -x "$target/share/sbgrid/bin/nukeme" ]; then
+        eval "$target/share/sbgrid/bin/nukeme"
+        nuke_exit=$?
+        clean_up "9${nuke_exit}"
+      fi
+
+      # If we were forced, then report that we tried to update
+      if [ -n "$FORCE" ]; then
+        curl_cmd -q -d action=update_force -d site="$sitename" "$UPDATE_URL" > /dev/null 2>&1
+      fi
+
+      # Write sitename file
+      if [ -d "$target/share" ]; then
+        echo "$sitename" > "$target/share/sitename"
+        host=$(hostname -s 2>&1)
+        if [ $? -ne 0 ]; then
+          host=$(hostname | awk '{print $1}')
+        fi
+        echo "$host" > "$target/share/hostname"
+        chmod 644 "$target/share/sitename" "$target/share/hostname"
+      else
+        log_error "The '/programs/share' directory does not exist!  This is a fatal error.\n"
+        log_error "Please run the update script again.\n" 44
+      fi
+
+      # Reinstall the cron job
+      install_cronjob
+
+      # Check rsync exit status for successful downloads, exit if it doesn't look good
+      if [ $rsync_exit -ne 0 ] && [ $rsync_exit -ne 23 ] && [ $rsync_exit -ne 24 ]; then
+        log_error "rsync exit code: $rsync_exit  This is an unusual rsync exit code. Your software\n"
+        log_error "installation may not be in a usable state. Please paste the shell output\n"
+        log_error "from this script into an email to accounts@sbgrid.org with any other details\n"
+        log_error "you think are relevant.\n" "7${rsync_exit}"
+      fi
+
+      ## Below is only run when the rsync was successful
+      # Record version number
+      if [ -d "$target/share/sbgrid" ]; then
+        echo "$REMOTE_VERSION" > "$target/share/sbgrid/version.major"
+        echo "$REMOTE_VERSION" > "$target/share/sbgrid/global.version"
+        chmod 644 "$target/share/sbgrid/version.major" "$target/share/sbgrid/global.version"
+        date "+%Y%m%d" > "$target/share/sbgrid/version.minor"
+        date "+%Y%m%d" > "$target/share/sbgrid/update.version"
+        date "+%Y-%m-%d" > "$target/share/sbgrid/update-formatted.version"
+        chmod 644 "$target/share/sbgrid/version.minor" "$target/share/sbgrid/update.version" "$target/share/sbgrid/update-formatted.version"
+        LOCAL_VERSION=$(cat "$target/share/sbgrid/version.major")
+      else
+        log_error "The '/programs/share' directory does not exist!  This is a fatal error.\n"
+        log_error "Please run the update script again.\n" 44
+      fi
+
+      # Generate shell configuration files
+      log_normal "Building shell configuration files.\n"
+      if [ -x "$target/share/sbgrid/bin/createrc" ]; then
+        "$target/share/sbgrid/bin/createrc" -ft "$target"
+        # XXX Check createrc exit status here
+      else
+        log_error "The installation is missing the script to create shell\n"
+        log_error "configuration files. This is a critical error.\n"
+        log_error "  Email accounts@sbgrid.org for assistance.\n" 45
+      fi
+
+      # Assemble Capsule bin dirs
+      log_normal "Assembling Capsule Bin \n"
+      if [ -x "$target/share/capsules/sbin/assemble_local" ]; then
+        "$target/share/capsules/sbin/assemble_local"
+        # XXX Check exit status here
+      else
+        log_normal "The installation is enabled for capsules\n"
+      fi
+
+      # Run a local job on successful updates.
+      if [ -n "$post_update_script" ]; then
+        "$post_update_script"
+      fi
+
+      # Print the symlink message for installs
+      if [ "$INSTALL" = "true" ]; then
+        log_normal "\n"
+        log_normal "To complete the installation, please create a symlink from the root\n"
+        log_normal "directory to the 'programs' directory. As the root or administrator\n"
+        log_normal "account, please run:\n"
+        log_normal "  sudo ln -s $target/ /programs\n"
+        log_normal "\n"
+      fi
+
+      # Clean up on successful updates
+      clean_up "8${rsync_exit}"
+    elif [ -x "$target/share/sbgrid/bin/sbgrid-admin" ]; then
+      log_normal "Updating the sbgrid-admin script to latest version..."
+      rsync_cmd $rsync_args -ptq "rsync://$sync_server/sbgrid-global/main/programs/share/sbgrid/bin/sbgrid-admin" "$target/share/sbgrid/bin/sbgrid-admin"
+      if [ $rsync_exit -ne 0 ]; then
+        log_error "\n"
+        log_error "Couldn't update the sbgrid-admin script!  Rsync exit code: $rsync_exit\n"
+        if [ $rsync_exit -eq 5 ]; then
+          log_error "Exit code 5 is an authentication failure. Did you specify\n"
+          log_error "the correct site name and site key?\n" 40
+        elif [ $rsync_exit -eq 10 ]; then
+          log_error "Exit code 10 is a connection failure. Is outbound rsync (TCP:873)\n"
+          log_error "blocked at your site?\n" 41
+        else
+          log_error "This is an unusual rsync exit code. Please paste the shell\n"
+          log_error "output into an email to accounts@sbgrid.org to generate a ticket.\n" 5${rsync_exit}
+        fi
+      fi
+      log_simple " success.\n"
+      export UPDATERUN=true
+      if [ "$SB_DEVMODE" = "true" ]; then
+        log_normal "Developer mode in effect. Running developer version.\n"
+        exec "$0"
+      else
+        exec "$target/share/sbgrid/bin/sbgrid-admin"
+      fi
+    else
+      export UPDATERUN=true
+      rsync_update
+    fi
+  else
+    log_error "Software installation target is not writable!\n"
+    clean_up 46
+  fi
+}
+
+### Get version numbers
+get_versions() {
+  REMOTE_VERSION=$(curl_cmd -m 60 -s "${STATUS_URL}key=version&site=$sitename&hostname=$host" 2> /dev/null)
+  if [ $? -eq 28 ]; then
+    log_error "Unable to reach $sync_server via HTTP. Please check network\n"
+    log_error "connectivity and try again.\n" 48
+  fi
+  eval "expr "1 + $REMOTE_VERSION"" > /dev/null 2>&1
+  if [ $? -ne 0 ]; then
+    log_error "Unable to determine SBGrid version number specified at:\n"
+    log_error "  ${STATUS_URL}key=version&site=$sitename&hostname=$host\n"
+    log_error "Please check network connectivity and try again.\n" 49
+  fi
+  if [ -r "$target/share/sbgrid/version.major" ]; then
+    LOCAL_VERSION=$(cat "$target/share/sbgrid/version.major")
+  fi
+  eval "expr "1 + $LOCAL_VERSION"" > /dev/null 2>&1
+  if [ $? -ne 0 ]; then
+    LOCAL_VERSION=0
+  fi
+}
+
+### Print a launchd plist for broken Macs
+print_plist() {
+if [ -f "$HOME/org.sbgrid.update.plist" ]; then
+  rm "$HOME/org.sbgrid.update.plist"
+fi
+cat > "$HOME/org.sbgrid.update.plist" <<SBPLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+    <string>org.sbgrid.update</string>
+  <key>ProgramArguments</key>
+    <array>
+      <string>$target/share/sbgrid/bin/sbgrid-admin</string>
+      <string>-c</string>
+    </array>
+  <key>RunAtLoad</key>
+    <false/>
+  <key>StartInterval</key>
+    <integer>900</integer>
+  <key>UserName</key>
+    <string>sbgrid</string>
+</dict>
+</plist>
+SBPLIST
+log_normal "A launchd plist to keep the software updated has been generated at:\n"
+log_normal "  $HOME/org.sbgrid.update.plist\n"
+log_normal "To install the plist, login as root or administrator and run:\n"
+log_normal "  sudo cp org.sbgrid.update.plist /Library/LaunchDaemons/\n"
+log_normal "  sudo chown root:wheel /Library/LaunchDaemons/org.sbgrid.update.plist\n"
+log_normal "  sudo launchctl load /Library/LaunchDaemons/org.sbgrid.update.plist\n"
+}
+
+### Cron job set up for auto updates
+install_cronjob() {
+  if [ -x "$target/share/sbgrid/bin/sbgrid-admin" ]; then
+    sapath="$target/share/sbgrid/bin/sbgrid-admin"
+  elif echo "$0" | grep -q / > /dev/null 2>&1 ; then
+    reldir=$(dirname $0)
+    fulldir=$(cd "$reldir" && pwd)
+    sapath="$fulldir/sbgrid-admin"
+  else
+    sapath=$(type $0 | awk '{print $3}')
+  fi
+  if [ "$osxver" = "10.5" ]; then # 10.5 and broken crontab case. Generate a launchd plist.
+    log_error "User cron jobs are broken on Mac OS X 10.5. A launchd plist\n"
+    log_error "has been generated at $HOME/org.sbgrid.update.plist that can \n"
+    log_error "be used to keep your installation updated. You must install\n"
+    log_error "this launchd job to keep the software updated.\n"
+    log_error "\n"
+    print_plist
+  else
+    log_normal "Installing user cron job to enable automatic updates.\n"
+    if [ -n "$custom_schedule" ]; then
+      printf "$custom_schedule $sapath -c\n" | crontab -
+    else
+      printf "*/15 * * * * $sapath -c\n" | crontab -
+    fi
+  fi
+}
+
+### Save state
+set_state() {
+  if [ -f "$LOCK" ]; then
+    LASTRUNPID=$(cat "$LOCK")
+    if [ "$$" != "$LASTRUNPID" ]; then
+      ps -p $LASTRUNPID > /dev/null 2>&1
+      if [ $? -eq 0 ]; then
+        if [ "$CRONMODE" = "true" ]; then
+          log_normal "Update in progress. Exiting...\n" 1
+        else
+          log_error "Update lock file exists and update seems to be running.\n"
+          log_error "If this is incorrect, delete the lockfile at\n"
+          log_error "$LOCK and rerun this script.\n" 1
+        fi
+      else
+        log_error "Update lockfile exists but no update appears to be\n"
+        log_error "running. Deleting the lockfile and continuing.\n"
+        log_error "Just thought you'd like to know...\n"
+        rm "$LOCK"
+      fi
+    fi
+  fi
+  log_normal "Creating update lock file: $LOCK\n"
+  echo "$$" > "$LOCK"
+  if [ "$?" -ne 0 ]; then
+    log_error "Can not create the update lock file!\n" 1
+  fi
+}
+
+### Start it up
+# Check to see that we are not being run by root
+if [ $(whoami) = "root" ]; then
+  log_error "This script should not be run as root\n" 1
+fi
+log_normal "Script started: $(date)\n"
+print_script_version
+
+### Test mode
+if [ "$TEST" = "true" ]; then
+  if [ -f "$CONFIG" ]; then
+    log_normal "Testing the SBGrid configuration file at:\n"
+    log_normal "  $CONFIG\n*\n"
+    log_normal "It contains the following settings:\n"
+    read_sbgridrc
+    log_normal "The configuration looks valid.\n"
+    log_normal "\n"
+    log_normal "Testing network connectivity:\n"
+    log_normal "  Checking HTTP access to $sync_server... "
+    curl_cmd -m 60 -s "${STATUS_URL}key=version&site=$sitename&hostname=$host" >& /dev/null
+    if [ $curl_exit -ne 0 ]; then
+      log_simple "failed!\n"
+      TEST_CURL_CONNECT=$(curl_cmd -m 60 -s -S "${STATUS_URL}key=version&site=$sitename&hostname=$host" 2>&1)
+      log_error "  Curl exit status was $curl_exit. This is probably bad.\n"
+      log_error "  The curl output was:\n"
+      log_error "    $TEST_CURL_CONNECT\n"
+      log_error "\n"
+      test_error=true
+    else
+      log_simple "success.\n"
+    fi
+    log_normal "  Checking rsync access to $sync_server... "
+    rsync_cmd $rsync_args rsync://$sync_server/sbgrid-test/test/OK >& /dev/null
+    if [ $rsync_exit -ne 0 ]; then
+      log_simple "failed!\n"
+      TEST_RSYNC_CONNECT=$(rsync_cmd $rsync_args rsync://$sync_server/sbgrid-test/test/OK 2>&1)
+      log_error "  Rsync exit status was $rsync_exit. This is probably bad.\n"
+      log_error "  The rsync output was:\n"
+      log_error "  $TEST_RSYNC_CONNECT\n"
+      log_error "\n"
+      test_error=true
+    else
+      log_simple "success.\n"
+      log_normal "\n"
+    fi
+    if [ "$test_error" != "true" ]; then
+      log_normal "Configuration and connectivity look okay!\n"
+      exit 0
+    else
+      log_error "  Send an email to accounts@sbgrid.org with this output for assistance.\n"
+      exit 1
+    fi
+  else
+    log_error "$CONFIG does not exist!\n" 1
+  fi
+fi
+
+### Install
+if [ "$INSTALL" = "true" ]; then
+  log_normal "Starting installation of SBGrid software suite.\n*\n"
+
+  # Check for installation prerequisites
+  REQS="rsync curl awk"
+  for binary in $REQS; do
+    type "$binary" > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+      log_error "Missing required command: $binary\n"
+      log_error "Please install it and then rerun this script.\n" 1
+    fi
+  done
+
+  # Create a config file and pull in the settings
+  if [ "$UPDATERUN" != "true" ]; then
+    create_sbgridrc
+    read_sbgridrc
+  else
+    read_sbgridrc
+  fi
+
+  # Create the installation target directory
+  if [ -e "$target" ] && [ ! -d "$target" ]; then
+    log_error "Installation target exists and is not a directory!\n" 1
+  elif [ ! -d "$target" ]; then
+    log_normal "Creating installation directory: $target\n"
+    mkdir -p "$target" > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+      log_error "Could not create installation directory at $target!\n" 1
+    fi
+  fi
+  get_versions
+  rsync_update
+fi
+
+### SGI Irix software installation
+if [ "$SGI" = "true" ]; then
+  log_normal "Starting installation of SBGrid SGI IRIX software branch.\n*\n"
+  read_sbgridrc
+  log_normal "Starting software download using rsync command:\n"
+  log_normal "  rsync -zrptKLODP rsync://$sync_server/sbgrid-irix/main/programs/iris4d $target\n\n"
+  rsync_cmd $rsync_args -zrptKLODP "rsync://$sync_server/sbgrid-irix/main/programs/iris4d" "$target" 2> /dev/null
+  # XXX no error checking
+fi
+
+### PowerPC software installation
+if [ "$POWERMAC" = "true" ]; then
+  log_normal "Starting installation of SBGrid OS X PowerPC software branch.\n*\n"
+  read_sbgridrc
+  log_normal "Starting software download using rsync command:\n"
+  log_normal "  rsync -zrptKLODP rsync://$sync_server/sbgrid-powermac/main/programs/powermac $target\n\n"
+  rsync_cmd $rsync_args -zrptKLODP "rsync://$sync_server/sbgrid-powermac/main/programs/powermac" "$target" 2> /dev/null
+  # XXX no error checking
+fi
+
+
+### Update
+if [ "$UPDATE" = "true" ]; then
+  log_normal "Starting manual update of SBGrid software suite.\n*\n"
+  read_sbgridrc
+  get_versions
+  rsync_update
+fi
+
+### Regenerate mode
+if [ "$REGEN" = "true" ]; then
+  log_normal "Regenerating SBGrid shell configuration files.\n"
+  read_sbgridrc
+  if [ -x "$target/share/sbgrid/bin/createrc" ]; then
+    "$target/share/sbgrid/bin/createrc" -ft "$target"
+    # XXX Check createrc exit status here
+  fi
+fi
+
+### Plist generation
+if [ "$PLIST" = "true" ]; then
+  log_normal "Generating a launchd plist.\n"
+  read_sbgridrc
+  print_plist
+fi
+
+### Cron mode
+if [ "$CRONMODE" = "true" ]; then
+  read_sbgridrc
+
+  today=$(date "+%Y%m%d")
+  if [ "${today}" -gt "20160924" ] && [ "${today}" -lt "20160926" ] ; then
+    exit 0
+  fi
+
+  get_versions
+  if [ "$REMOTE_VERSION" -gt "$LOCAL_VERSION" ]; then
+    rsync_update
+  fi
+
+  # Check for forced update
+  FORCE=$(curl_cmd -m 60 -s "${STATUS_URL}key=force&site=$sitename")
+  eval "expr "1 + $FORCE"" > /dev/null 2>&1
+  if [ $? -ne 0 ]; then
+    FORCE=0
+  fi
+  if [ $FORCE -eq 1 ]; then
+    rsync_update
+  fi
+fi

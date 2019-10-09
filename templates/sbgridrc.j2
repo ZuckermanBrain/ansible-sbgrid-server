@@ -1,0 +1,3 @@
+{% for envvar,envval in sbgridrc.items() %}
+{{ envvar | upper }}={{ envval }}
+{% endfor %}

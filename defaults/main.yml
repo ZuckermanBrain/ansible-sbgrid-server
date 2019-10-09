@@ -1,2 +1,22 @@
 ---
 # defaults file for app-sbgrid-server
+
+# These are placeholders that should be overridden
+# with your info in group_vars or host_vars.
+sb_sitename : "default"
+sb_sitekey : "default"
+
+# This role assumes that mountpoints have already
+# been configured in another role.
+sb_install_target : "/programs"
+
+# A dict containing all the environmental variables
+# that should be defined in sbgridrc
+sbgridrc:
+    sb_sitename : "{{ sb_sitename }}"
+    sb_sitekey : "{{ sb_sitekey }}"
+    install_target : "{{ sb_install_target }}"
+    #rsync_args : 
+    #http_proxy : host.name:port
+    #sync_server : host.name
+    #post_update_script : /absolute/path/to/script
