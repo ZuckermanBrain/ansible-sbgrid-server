@@ -16,8 +16,8 @@
 
 - name: Fetch the most current SBGrid install script
   get_url:
-    url: http://sync.sbgrid.org/downloads/fitzpatrick_a_058i/sbgrid-admin
-    dest: /var/lib/sbgrid/sbgrid-admin
+    url: "http://sync.sbgrid.org/downloads/{{ sb_sitename }}/sbgrid-admin"
+    dest: /tmp/sbgrid-admin
     mode: "0550"
   register: sbgrid_script_web
   ignore_errors: yes
@@ -27,7 +27,7 @@
 - name: Use the SBGrid install script in this role as a fallback if the web one doesn't work
   copy:
     src: files/sbgrid-admin
-    dest: /var/lib/sbgrid/sbgrid-admin
+    dest: /tmp/sbgrid-admin
     mode: "0550"
   when: sbgrid_script_web.msg != 200
   become: yes
@@ -40,14 +40,16 @@
     mode: "0440"
     owner: sbgrid
 
+# Timeout for expect module needs to be null for async to work properly.
 - name: Run the install script asynchronously.  Assume downloads take 2 days max.
   expect:
-    command: /bin/bash -c "/var/lib/sbgrid/sbgrid-admin -i"
+    command: /bin/bash -c "/tmp/sbgrid-admin -i"
+    timeout: null
     responses:
       Would you like to change these settings *: "n"
       Shall we proceed? *: "y"
   async: 172800
-  poll: 60
+  poll: 0
   become: yes
   become_user: sbgrid
 
