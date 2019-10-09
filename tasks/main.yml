@@ -1,2 +1,77 @@
 ---
 # tasks file for app-sbgrid-server
+
+- name: Make a service account for sbgrid
+  user:
+    name: sbgrid
+    home: /var/lib/sbgrid
+    shell: /sbin/nologin
+
+- name: Ensure that the install directory is present and owned by sbgrid
+  file:
+    path: "{{ sb_install_target }}"
+    state: directory
+    mode: "0770"
+    owner: sbgrid
+
+- name: Fetch the most current SBGrid install script
+  get_url:
+    url: http://sync.sbgrid.org/downloads/fitzpatrick_a_058i/sbgrid-admin
+    dest: /var/lib/sbgrid/sbgrid-admin
+    mode: "0550"
+  register: sbgrid_script_web
+  ignore_errors: yes
+  become: yes
+  become_user: sbgrid
+
+- name: Use the SBGrid install script in this role as a fallback if the web one doesn't work
+  copy:
+    src: files/sbgrid-admin
+    dest: /var/lib/sbgrid/sbgrid-admin
+    mode: "0550"
+  when: sbgrid_script_web.msg != 200
+  become: yes
+  become_user: sbgrid
+
+- name: Install the SBGrid config file
+  template:
+    src: templates/sbgridrc.j2
+    dest: /var/lib/sbgrid/.sbgridrc
+    mode: "0440"
+    owner: sbgrid
+
+- name: Run the install script asynchronously.  Assume downloads take 2 days max.
+  expect:
+    command: /bin/bash -c "/var/lib/sbgrid/sbgrid-admin -i"
+    responses:
+      Would you like to change these settings *: "n"
+      Shall we proceed? *: "y"
+  async: 172800
+  poll: 60
+  become: yes
+  become_user: sbgrid
+
+## This actually belongs in the sbgrid client role
+#- name: Install 32-bit libraries (required by some SBGrid packages)
+#  yum:
+#    name:
+#      - glibc.i686
+#      - gnome-terminal
+#      - libgcc.i686
+#      - libX11.i686
+#      - libXaw.i686
+#      - libXext.i686
+#      - ncurses.i686
+#      - redhat-lsb.i686
+#      - xorg-x11-fonts-75dpi
+#      - xorg-x11-fonts-100dpi
+#      - xorg-x11-fonts-ISO8859-1-75dpi
+#      - xorg-x11-fonts-ISO8859-1-100dpi
+#      - xorg-x11-fonts-misc
+#      - libXScrnSaver
+#      - freetype.i686
+#      - fontconfig.i686
+#      - zlib.i686
+#      - libstdc++.i686
+#    state: present
+#
