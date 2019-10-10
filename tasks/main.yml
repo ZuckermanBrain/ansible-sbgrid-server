@@ -36,7 +36,7 @@
 
 - name: Use the SBGrid install script in this role as a fallback if the web one doesn't work
   copy:
-    src: files/sbgrid-admin
+    src: sbgrid-admin
     dest: /var/lib/sbgrid/sbgrid-admin
     mode: "0550"
   when: sbgrid_script_web.msg != 200
@@ -48,7 +48,7 @@
 
 - name: Install the SBGrid config file
   template:
-    src: templates/sbgridrc.j2
+    src: sbgridrc.j2
     dest: /var/lib/sbgrid/.sbgridrc
     mode: "0440"
     owner: sbgrid
@@ -85,28 +85,3 @@
   tags:
     - never
     - sbgrid_server_fullinstall
-
-## This actually belongs in the sbgrid client role
-#- name: Install 32-bit libraries and other pre-requisites required by some SBGrid packages
-#  yum:
-#    name:
-#      - glibc.i686
-#      - gnome-terminal
-#      - libgcc.i686
-#      - libX11.i686
-#      - libXaw.i686
-#      - libXext.i686
-#      - ncurses.i686
-#      - redhat-lsb.i686
-#      - xorg-x11-fonts-75dpi
-#      - xorg-x11-fonts-100dpi
-#      - xorg-x11-fonts-ISO8859-1-75dpi
-#      - xorg-x11-fonts-ISO8859-1-100dpi
-#      - xorg-x11-fonts-misc
-#      - libXScrnSaver
-#      - freetype.i686
-#      - fontconfig.i686
-#      - zlib.i686
-#      - libstdc++.i686
-#    state: present
-#
