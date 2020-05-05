@@ -39,19 +39,6 @@
     dest: /var/lib/sbgrid/sbgrid-admin
     mode: "0550"
   register: sbgrid_script_web
-  ignore_errors: yes
-  become: yes
-  become_user: sbgrid
-  tags:
-    - sbgrid_server_crononly
-    - sbgrid_server_fullinstall
-
-- name: Use the SBGrid install script in this role as a fallback if the web one doesn't work
-  copy:
-    src: sbgrid-admin
-    dest: /var/lib/sbgrid/sbgrid-admin
-    mode: "0550"
-  when: sbgrid_script_web.msg != 200
   become: yes
   become_user: sbgrid
   tags:
