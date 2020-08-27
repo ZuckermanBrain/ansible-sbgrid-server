@@ -72,7 +72,7 @@
 # This will only execute if the tag is explicitly requested (see https://docs.ansible.com/ansible/latest/user_guide/playbooks_tags.html#special-tags)
 - name: Run the install script asynchronously.  Assume downloads take 2 days max.
   expect:
-    command: /bin/bash -c "/var/lib/sbgrid-admin -i"
+    command: /bin/bash -c "/var/lib/sbgrid/sbgrid-admin -i"
     timeout: null
     responses:
       Would you like to change these settings *: "n"
