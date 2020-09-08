@@ -30,7 +30,6 @@
     owner: sbgrid
     recurse: yes
   tags:
-    - sbgrid_server_crononly
     - sbgrid_server_fullinstall
 
 - name: Fetch the most current SBGrid install script
@@ -42,7 +41,6 @@
   become: yes
   become_user: sbgrid
   tags:
-    - sbgrid_server_crononly
     - sbgrid_server_fullinstall
 
 - name: Install the SBGrid config file
@@ -52,17 +50,16 @@
     mode: "0440"
     owner: sbgrid
   tags:
-    - sbgrid_server_crononly
     - sbgrid_server_fullinstall
 
-# The cronjob will be overwritten by the sbgrid-admin script
-# the first time it is invoked.
+# The cronjob will be overwritten by the sbgrid-admin script on updates and the first time it is invoked,
+# so we use the path that the sbgrid-admin script wants to use.
 # This will only execute if the tag is explicitly requested (see https://docs.ansible.com/ansible/latest/user_guide/playbooks_tags.html#special-tags)
 - name: Add cronjob if it does not exist already.
   cron:
     name: "SBGrid update cronjob"
     minute: "*/15"
-    job: "/var/lib/sbgrid/sbgrid-admin -c"
+    job: "{{ sb_install_target }}/share/sbgrid/bin/sbgrid-admin -c"
     user: sbgrid
   tags:
     - never
