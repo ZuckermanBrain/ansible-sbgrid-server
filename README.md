@@ -18,8 +18,11 @@ An NFS mount must be set up and exported.  The set up of this NFS mount is beyon
 Role Variables
 --------------
 `sb_sitename` (string) : Your SBGrid site name as provided by the SBGrid Consortium (see [here](https://sbgrid.org/wiki/usage/installation_admin)).
+
 `sb_sitekey` (string) : Your SBGrid site key as provided by the SBGrid Consortium (see [here](https://sbgrid.org/wiki/usage/installation_admin)).
+
 `sbgridrc` (dict) : A dictionary containing all of the environment variables that should be defined in `.sbgridrc` (see [here](https://sbgrid.org/wiki/usage/installation_admin)).  Keys are identical to the environment variables but use lowercase instead of uppercase.
+
 `sb_install_target` (string) : A path to where the software should be installed.
 
 License
