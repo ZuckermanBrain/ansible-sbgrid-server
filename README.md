@@ -8,7 +8,7 @@ This role also has several important tags that can selectively narrow down the t
   * `sbgrid_server_crononly` will only add or update the `sbgrid-admin -c` cronjob.
   * `sbgrid_server_fullinstall` will run `sbgrid-admin -i` and perform a full installation of the SBGrid consortium packages.
 
-If these tags are not applied, neither the task that updates the cronjob nor the task that performations the installation will be run.  It is important then that the intial run using this role uses both of these tags.  This is enforced by use of the `never` tag (see [here](https://docs.ansible.com/ansible/latest/user_guide/playbooks_tags.html)).
+If these tags are not applied, neither the task that updates the cronjob nor the task that performs the installation will be run.  It is important then that the intial run using this role uses both of these tags.  This is enforced by use of the `never` tag (see [here](https://docs.ansible.com/ansible/latest/user_guide/playbooks_tags.html)).
 
 Requirements
 ------------
